@@ -1,10 +1,16 @@
 
 import rclpy
-from sensor_msgs.msg import Imu
+
+from sensor_msgs.msg import Imu, Temperature
+import numpy as np
 import serial
 import serial
 import struct
 import math
+from tf2_ros import TransformBroadcaster
+import tf_transformations
+
+
 
 BYTE_HEADER_CMD = 0x24
 BYTE_HEADER_REP = 0x23
@@ -69,6 +75,7 @@ BOOTLOADER_REV = Reg(0x13, 2, 0)
 FLASH_ENDURANCE = Reg(0x15, 4, 0)
 OUT_DATA_FORM = Reg(0x19, 1, 0)
 SELECT_OUT_DATA = Reg(0x1C, 1, 0)
+SAMPLE_RATE_DIV = Reg(0x1A, 2, 0)
 # Initialize the serial port
 ser = serial.Serial('/dev/ttyUSB0', 921600)
 
@@ -106,7 +113,10 @@ def IIM46234_SetCMD_WriteRegister(user_reg, value):
     cmd_packet[7] = user_reg.page_id
 
     if user_reg.length == 1:
-        cmd_packet[8] = value  # Assuming value is a list of bytes in Python
+        cmd_packet[8] = value  
+    elif user_reg.length == 2:
+        cmd_packet[8] = (value >> 8) & 0xFF
+        cmd_packet[9] = value & 0xFF
     else:
         print("Does not support this length")
 
@@ -171,6 +181,21 @@ def IIM46234_Get_SerialNum():
     #
     #     print('serial #:', W0*pow(2,96)+W1*pow(2,64)+W2*pow(2,32)+W3)
 
+# enum IIM46234_SampleRateDiv {
+#     ODR_1KHZ = 1,
+#     ODR_500HZ = 2,
+#     ODR_250HZ = 4,
+#     ODR_200HZ = 5,
+#     ODR_125HZ = 8,
+#     ODR_100HZ = 10,
+#     ODR_50HZ = 20,
+#     ODR_25HZ = 40,
+#     ODR_20HZ = 50,
+#     ODR_10HZ = 100 // 0x64
+# };
+def IIM46234_Set_SampleRateDiv(divisor):
+    cmd_packet = IIM46234_SetCMD_WriteRegister(SAMPLE_RATE_DIV, divisor)
+    ser.write(bytearray(cmd_packet))
 
 
 def IIM46234_Start_Streaming():
@@ -184,7 +209,10 @@ def IIM46234_Stop_Streaming():
 
 
 def IIM46234_Set_SelectOutData(select_out_data):
-    IIM46234_SetCMD_WriteRegister(SELECT_OUT_DATA, select_out_data)
+    cmd_packet = IIM46234_SetCMD_WriteRegister(SELECT_OUT_DATA, select_out_data)
+    ser.write(bytearray(cmd_packet))
+   
+
 def convert_to_float(fixed_value, scale_factor):
     if fixed_value > 2**31:  # check if the value exceeds 2^31
         fixed_value = fixed_value - 2**32  # convert to negative
@@ -193,7 +221,8 @@ def convert_to_float(fixed_value, scale_factor):
 
 def IIM46234_Set_OutDataForm(out_data_form):
     global FORMAT, accel_scale, gyro_scale, temp_scale, temp_offset
-    IIM46234_SetCMD_WriteRegister(OUT_DATA_FORM, out_data_form)
+    cmd_packet = IIM46234_SetCMD_WriteRegister(OUT_DATA_FORM, out_data_form)
+    # ser.write(bytearray(cmd_packet))
     if out_data_form == 0:
         FORMAT = '>HBBBB8s7fHH'
         accel_scale = 1
@@ -230,7 +259,15 @@ class IIM4623xData:
             self.footer
         ) = struct.unpack(FORMAT, buffer)
 
+def accel_to_quaternion(accel):
+    ref = np.array([0, 0, 1])
+    acceln = accel / np.linalg.norm(accel)
+    axis = np.cross(acceln, ref)
+    angle = np.arccos(np.dot(acceln, ref))
+    
+    q = tf_transformations.quaternion_about_axis(angle, axis)
 
+    return q
 
 def read_sensor(node, imu_pub):
     while True:
@@ -262,8 +299,11 @@ def read_sensor(node, imu_pub):
         data.gz = convert_to_float(data.gz, gyro_scale)
         data.temp = data.temp*temp_scale+temp_offset
 
+
+
         # print(f"ax: {data.ax}, ay: {data.ay}, az: {data.az} gx: {data.gx}, gy: {data.gy}, gz: {data.gz} temp: {data.temp}")
         imu_msg = Imu()
+        imu_msg.header.frame_id = "iim46234"
         imu_msg.header.stamp = node.get_clock().now().to_msg()
         imu_msg.linear_acceleration.x = data.ax
         imu_msg.linear_acceleration.y = data.ay
@@ -271,7 +311,17 @@ def read_sensor(node, imu_pub):
         imu_msg.angular_velocity.x = data.gx
         imu_msg.angular_velocity.y = data.gy
         imu_msg.angular_velocity.z = data.gz
-        imu_msg.orientation_covariance = [-1.0] * 9  # Set orientation covariance to indicate no orientation data
+
+        # Calculate the orientation using the acceleration data
+        orientation_quat = accel_to_quaternion(np.array([data.ax, data.ay, data.az]))
+        imu_msg.orientation.x = orientation_quat[1]
+        imu_msg.orientation.y = orientation_quat[2]
+        imu_msg.orientation.z = orientation_quat[3]
+        imu_msg.orientation.w = orientation_quat[0]
+        
+        
+
+        # imu_msg.orientation_covariance = [-1.0] * 9  # Set orientation covariance to indicate no orientation data
 
 
         # Publish the Imu message
@@ -280,23 +330,29 @@ def read_sensor(node, imu_pub):
 
 
 
+
+
+
 def main():
     rclpy.init()
     node = rclpy.create_node('iim46234_publisher')
 
-    imu_pub = node.create_publisher(Imu, 'iim46234', 10)
+    imu_pub = node.create_publisher(Imu, '/imu/data_raw', 10)
     IIM46234_Read_WhoAmI()
     IIM46234_Get_Version()
-    IIM46234_Set_SelectOutData(BIT_SELECT_OUT_DATA_ACC | BIT_SELECT_OUT_DATA_GYRO | BIT_SELECT_OUT_DATA_TEMP)
+    # IIM46234_Set_SampleRateDiv(10)
     IIM46234_Get_SerialNum()
     IIM46234_Set_OutDataForm(0)
     IIM46234_Start_Streaming()
     
+    timer_frequency = 100  # 100Hz
+    timer_period = 1.0 / timer_frequency
+    timer = node.create_timer(timer_period, lambda: read_sensor(node, imu_pub))
+
 
     try:
         while rclpy.ok():
-            # Read data from the IMU sensor
-            read_sensor(node, imu_pub)
+            rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
