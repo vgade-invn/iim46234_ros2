@@ -9,7 +9,7 @@ import struct
 import math
 from tf2_ros import TransformBroadcaster
 import tf_transformations
-
+from rclpy.qos import QoSProfile
 
 
 BYTE_HEADER_CMD = 0x24
@@ -77,7 +77,7 @@ OUT_DATA_FORM = Reg(0x19, 1, 0)
 SELECT_OUT_DATA = Reg(0x1C, 1, 0)
 SAMPLE_RATE_DIV = Reg(0x1A, 2, 0)
 # Initialize the serial port
-ser = serial.Serial('/dev/ttyUSB0', 921600)
+ser = serial.Serial('/dev/ttyACM0', 921600)
 
 def calc_checksum(buff):
     return sum(buff) & 0xFFFF
@@ -226,13 +226,14 @@ def IIM46234_Set_OutDataForm(out_data_form):
     if out_data_form == 0:
         FORMAT = '>HBBBB8s7fHH'
         accel_scale = 1
-        gyro_scale = 1
+        gyro_scale = math.pi / 180
         temp_scale = 1
         temp_offset = 0
     else:
         FORMAT = '>HBBBB8s7LHH'
         accel_scale = 8 / 2 ** 31
-        gyro_scale = 480 / 2 ** 31
+        gyro_scale_dps = 480 / 2 ** 31
+        gyro_scale= gyro_scale_dps * math.pi / 180
         temp_scale = 126.8
         temp_offset = 25
 
@@ -337,10 +338,14 @@ def main():
     rclpy.init()
     node = rclpy.create_node('iim46234_publisher')
 
-    imu_pub = node.create_publisher(Imu, '/imu/data_raw', 10)
+ 
+    qos_profile = rclpy.qos.qos_profile_sensor_data
+
+    imu_pub = node.create_publisher(Imu, '/imu/data_raw', qos_profile=qos_profile)
+
+
     IIM46234_Read_WhoAmI()
     IIM46234_Get_Version()
-    # IIM46234_Set_SampleRateDiv(10)
     IIM46234_Get_SerialNum()
     IIM46234_Set_OutDataForm(0)
     IIM46234_Start_Streaming()
