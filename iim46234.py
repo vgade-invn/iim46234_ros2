@@ -48,9 +48,56 @@ BIT_SAVE_ALL_CONFIG_RESULT_IN_PROGRESS = 0x00
 BIT_SAVE_ALL_CONFIG_RESULT_SUCCESS = 0x01
 BIT_SAVE_ALL_CONFIG_RESULT_NOT_SAVED = 0x02
 
+ACC_FSR_16G = 0x00
+ACC_FSR_8G = 0x20
+ACC_FSR_4G = 0x40
+ACC_FSR_2G = 0x60
+GYRO_FSR_2000DPS = 0x00
+GYRO_FSR_1000DPS = 0x20
+GYRO_FSR_500DPS = 0x40
+GYRO_FSR_480DPS = 0x40
+GYRO_FSR_250DPS = 0x60
+ACC_LPF_BW4 = 0x40
+ACC_LPF_BW5 = 0x50
+ACC_LPF_BW6 = 0x60
+ACC_LPF_BW7 = 0x70
+GYRO_LPF_BW4 = 0x4
+GYRO_LPF_BW5 = 0x5
+GYRO_LPF_BW6 = 0x6
+GYRO_LPF_BW7 = 0x7
+
+dict_acc_fsr = {
+    ACC_FSR_16G: '16g',
+    ACC_FSR_8G: '8g',
+    ACC_FSR_4G: '4g',
+    ACC_FSR_2G: '2g'
+}
+dict_gyr_fsr = {
+    GYRO_FSR_2000DPS: '2000dps',
+    GYRO_FSR_1000DPS: '1000dps',
+    GYRO_FSR_500DPS: '500dps',
+    GYRO_FSR_480DPS: '480dps',
+    GYRO_FSR_250DPS: '250dps'
+}
+dict_acc_bw = {
+    ACC_LPF_BW4: 'BW4',
+    ACC_LPF_BW5: 'BW5',
+    ACC_LPF_BW6: 'BW6',
+    ACC_LPF_BW7: 'BW7'
+}
+dict_gyr_bw = {
+    GYRO_LPF_BW4: 'BW4',
+    GYRO_LPF_BW5: 'BW5',
+    GYRO_LPF_BW6: 'BW6',
+    GYRO_LPF_BW7: 'BW7'
+}
 
 IIM4623x_GRAVITY = 9.8
 global FORMAT, accel_scale, gyro_scale, temp_scale, temp_offset
+global lpf_bw, accel_fsr, gyro_fsr
+lpf_bw = ACC_LPF_BW4 | GYRO_LPF_BW4
+accel_fsr = ACC_FSR_8G | 0x06
+gyro_fsr = GYRO_FSR_480DPS | 0x06
 class Reg:
     def __init__(self, first_addr, length, page_id):
         self.first_addr = first_addr
@@ -64,6 +111,9 @@ BOOTLOADER_REV = Reg(0x13, 2, 0)
 FLASH_ENDURANCE = Reg(0x15, 4, 0)
 OUT_DATA_FORM = Reg(0x19, 1, 0)
 SELECT_OUT_DATA = Reg(0x1C, 1, 0)
+BW_CONFIG = Reg(0x30, 1, 0)
+ACCEL_CONFIG0 = Reg(0x33, 1, 0)
+GYRO_CONFIG0 = Reg(0x34, 1, 0)
 # Initialize the serial port
 ser = serial.Serial('COM22', 921600)
 
@@ -202,6 +252,58 @@ def IIM46234_Set_OutDataForm(out_data_form):
         temp_scale = 126.8
         temp_offset = 25
 
+def IIM46234_Read_AccelConfig():
+    cmd_packet = IIM46234_SetCMD_ReadRegister(ACCEL_CONFIG0)
+    ser.write(bytearray(cmd_packet))
+    fsr = ser.readline()
+    print('ACCEL_CONFIG:', dict_acc_fsr[fsr[12] ^ 0x06])
+
+def IIM46234_Set_AccelConfig(value):
+    global accel_fsr
+    accel_fsr &= 0x1F
+    accel_fsr |= value
+    cmd_packet = IIM46234_SetCMD_WriteRegister(ACCEL_CONFIG0, accel_fsr)
+    ser.write(bytearray(cmd_packet))
+
+def IIM46234_Read_GyroConfig():
+    cmd_packet = IIM46234_SetCMD_ReadRegister(GYRO_CONFIG0)
+    ser.write(bytearray(cmd_packet))
+    fsr = ser.readline()
+    print('GYRO_CONFIG:', dict_gyr_fsr[fsr[12] ^ 0x06])
+
+def IIM46234_Set_GyroConfig(value):
+    global gyro_fsr
+    gyro_fsr &= 0x1F
+    gyro_fsr |= value
+    cmd_packet = IIM46234_SetCMD_WriteRegister(GYRO_CONFIG0, gyro_fsr)
+    ser.write(bytearray(cmd_packet))
+
+def IIM46234_Read_BWConfig_Accel():
+    cmd_packet = IIM46234_SetCMD_ReadRegister(BW_CONFIG)
+    ser.write(bytearray(cmd_packet))
+    bw = ser.readline()
+    print('ACCEL_BW:', dict_acc_bw[bw[12] & 0xF0])
+
+def IIM46234_Set_BWConfig_Accel(acc_bw):
+    global lpf_bw
+    lpf_bw &= 0x0F
+    lpf_bw |= acc_bw
+    cmd_packet = IIM46234_SetCMD_WriteRegister(BW_CONFIG, lpf_bw)
+    ser.write(bytearray(cmd_packet))
+
+def IIM46234_Read_BWConfig_Gyro():
+    cmd_packet = IIM46234_SetCMD_ReadRegister(BW_CONFIG)
+    ser.write(bytearray(cmd_packet))
+    bw = ser.readline()
+    print('Gyro_BW:', dict_gyr_bw[bw[12] & 0x0F])
+
+def IIM46234_Set_BWConfig_Gyro(gyr_bw):
+    global lpf_bw
+    lpf_bw &= 0xF0
+    lpf_bw |= gyr_bw
+    cmd_packet = IIM46234_SetCMD_WriteRegister(BW_CONFIG, lpf_bw)
+    ser.write(bytearray(cmd_packet))
+
 class IIM4623xData:
     # Define the format for struct.unpack based on the structure layout
 
@@ -267,14 +369,20 @@ def main():
     IIM46234_Set_SelectOutData(BIT_SELECT_OUT_DATA_ACC | BIT_SELECT_OUT_DATA_GYRO | BIT_SELECT_OUT_DATA_TEMP)
     IIM46234_Get_SerialNum()
     IIM46234_Set_OutDataForm(0)
-    IIM46234_Start_Streaming()
-    read_sensor()
+    IIM46234_Read_AccelConfig()
+    IIM46234_Read_GyroConfig()
+    IIM46234_Read_BWConfig_Accel()
+    IIM46234_Read_BWConfig_Gyro()
+    IIM46234_Set_BWConfig_Accel(ACC_LPF_BW6)
+    IIM46234_Read_BWConfig_Accel()
+    # IIM46234_Start_Streaming()
+    # read_sensor()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        IIM46234_Stop_Streaming()
+        # IIM46234_Stop_Streaming()
         ser.close()
 
 
