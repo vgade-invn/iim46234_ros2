@@ -1,6 +1,9 @@
 import serial
 import struct
 import math
+import time
+from typing import Optional
+
 BYTE_HEADER_CMD = 0x24
 BYTE_HEADER_REP = 0x23
 BYTE_RESERVED = 0x00
@@ -96,7 +99,7 @@ IIM4623x_GRAVITY = 9.8
 global FORMAT, accel_scale, gyro_scale, temp_scale, temp_offset
 global lpf_bw, accel_fsr, gyro_fsr
 lpf_bw = ACC_LPF_BW4 | GYRO_LPF_BW4
-accel_fsr = ACC_FSR_8G | 0x06
+accel_fsr = ACC_FSR_4G | 0x06
 gyro_fsr = GYRO_FSR_480DPS | 0x06
 class Reg:
     def __init__(self, first_addr, length, page_id):
@@ -114,8 +117,9 @@ SELECT_OUT_DATA = Reg(0x1C, 1, 0)
 BW_CONFIG = Reg(0x30, 1, 0)
 ACCEL_CONFIG0 = Reg(0x33, 1, 0)
 GYRO_CONFIG0 = Reg(0x34, 1, 0)
+SAMPLE_RATE_DIV = Reg (0x1A, 2 , 0)
 # Initialize the serial port
-ser = serial.Serial('COM22', 921600)
+# ser = serial.Serial('COM4', 921600)
 
 def calc_checksum(buff):
     return sum(buff) & 0xFFFF
@@ -139,7 +143,6 @@ def IIM46234_SetCMD_ReadRegister(user_reg):
 
 
 def IIM46234_SetCMD_WriteRegister(user_reg, value):
-
     cmd_packet = [0x00] * SIZE_PACKET_CMD
     cmd_packet[0] = BYTE_HEADER_CMD
     cmd_packet[1] = BYTE_HEADER_CMD
@@ -151,20 +154,27 @@ def IIM46234_SetCMD_WriteRegister(user_reg, value):
     cmd_packet[7] = user_reg.page_id
 
     if user_reg.length == 1:
-        cmd_packet[8] = value  # Assuming value is a list of bytes in Python
+        cmd_packet[8] = value
+    elif user_reg.length == 2:
+        cmd_packet[8] = (value >> 8) & 0xFF
+        cmd_packet[9] = value & 0xFF
+    elif user_reg.length == 4:
+        cmd_packet[8] = (value >> 24) & 0xFF
+        cmd_packet[9] = (value >> 16) & 0xFF
+        cmd_packet[10] = (value >> 8) & 0xFF
+        cmd_packet[11] = value & 0xFF
     else:
         print("Does not support this length")
+        return None
 
-    # Assuming calc_checksum is a function that's already defined in Python
     checksum = calc_checksum(cmd_packet[3:8 + user_reg.length])
 
     cmd_packet[8 + user_reg.length] = (checksum >> 8) & 0xFF
-    cmd_packet[9 + user_reg.length] = checksum & 0x00FF
+    cmd_packet[9 + user_reg.length] = checksum & 0xFF
     cmd_packet[10 + user_reg.length] = BYTE_FOOTER_1
     cmd_packet[11 + user_reg.length] = BYTE_FOOTER_2
 
-    return cmd_packet  # Added this line to return the cmd_packet, since the original C code doesn't explicitly return anything
-
+    return cmd_packet
 
 def IIM46234_SetCMD_Common(cmd_type):
     cmd_packet = [0x00] * SIZE_PACKET_CMD
@@ -303,6 +313,26 @@ def IIM46234_Set_BWConfig_Gyro(gyr_bw):
     lpf_bw |= gyr_bw
     cmd_packet = IIM46234_SetCMD_WriteRegister(BW_CONFIG, lpf_bw)
     ser.write(bytearray(cmd_packet))
+# enum IIM4623x_SampleRateDiv {
+#     ODR_1KHZ = 1,
+#     ODR_500HZ = 2,
+#     ODR_250HZ = 4,
+#     ODR_200HZ = 5,
+#     ODR_125HZ = 8,
+#     ODR_100HZ = 10,
+#     ODR_50HZ = 20,
+#     ODR_25HZ = 40,
+#     ODR_20HZ = 50,
+#     ODR_10HZ = 100 // 0x64
+# };
+
+
+def IIM46234_Set_SampleRateDiv(divisor):
+    cmd_packet = IIM46234_SetCMD_WriteRegister(SAMPLE_RATE_DIV, divisor)
+    ser.write(bytearray(cmd_packet))
+
+
+
 
 class IIM4623xData:
     # Define the format for struct.unpack based on the structure layout
@@ -361,9 +391,29 @@ def read_sensor():
 
         print(f"ax: {data.ax}, ay: {data.ay}, az: {data.az} gx: {data.gx}, gy: {data.gy}, gz: {data.gz} temp: {data.temp}")
 
+def find_port() -> Optional[str]:
+    from serial.tools.list_ports import comports
 
+    vid = [0x403, 0x04b4]
+    pid = [0x6001, 0x0003]
+    for info in comports():
+        if info.vid and info.vid in vid and info.pid in pid:
+            return info.device
+        if 'VID_04B4' in info.hwid and 'PID_0003' in info.hwid:
+            return info.device
+    return None
 
 def main():
+    com_port = find_port()
+    if com_port is None:
+        print("No suitable COM port found.")
+        return
+
+    global ser
+    ser = serial.Serial(com_port, baudrate=921600, timeout=10)
+    ser.set_buffer_size(rx_size=921600, tx_size=128)
+    ser.reset_input_buffer()
+
     IIM46234_Read_WhoAmI()
     IIM46234_Get_Version()
     IIM46234_Set_SelectOutData(BIT_SELECT_OUT_DATA_ACC | BIT_SELECT_OUT_DATA_GYRO | BIT_SELECT_OUT_DATA_TEMP)
@@ -373,8 +423,21 @@ def main():
     IIM46234_Read_GyroConfig()
     IIM46234_Read_BWConfig_Accel()
     IIM46234_Read_BWConfig_Gyro()
+
+    #  ODR_1KHZ = 1, 
+    IIM46234_Set_SampleRateDiv(1)
+    time.sleep(1)
     IIM46234_Set_BWConfig_Accel(ACC_LPF_BW6)
-    IIM46234_Read_BWConfig_Accel()
+    time.sleep(1)
+    IIM46234_Set_BWConfig_Gyro(GYRO_LPF_BW6)
+    time.sleep(1)
+    IIM46234_Set_AccelConfig(accel_fsr)
+    time.sleep(1)   
+    IIM46234_Set_GyroConfig(gyro_fsr)
+    time.sleep(1)       
+    # IIM46234_Read_BWConfig_Accel()
+    # IIM46234_Read_BWConfig_Gyro()
+    # IIM46234_Read_BWConfig_Accel()
     # IIM46234_Start_Streaming()
     # read_sensor()
 
