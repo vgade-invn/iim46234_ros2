@@ -1,9 +1,11 @@
 import serial
+import signal
 import struct
 import math
 import time
+import sys
 from typing import Optional
-
+import logging
 BYTE_HEADER_CMD = 0x24
 BYTE_HEADER_REP = 0x23
 BYTE_RESERVED = 0x00
@@ -403,6 +405,24 @@ def find_port() -> Optional[str]:
             return info.device
     return None
 
+def sig_handler(sig, frame):
+    global ser
+    logging.info(f'Program terminated by signal #{sig}')
+    cleanup()
+    sys.exit(0)
+
+def cleanup():
+    global ser
+    try:
+        if ser.is_open:
+            IIM46234_Stop_Streaming()
+            ser.close()
+            logging.info("Serial connection closed.")
+    except Exception as e:
+        logging.error(f"Error during cleanup: {e}")
+
+signal.signal(signal.SIGINT, sig_handler)
+
 def main():
     com_port = find_port()
     if com_port is None:
@@ -425,27 +445,26 @@ def main():
     IIM46234_Read_BWConfig_Gyro()
 
     #  ODR_1KHZ = 1, 
-    IIM46234_Set_SampleRateDiv(1)
-    time.sleep(1)
-    IIM46234_Set_BWConfig_Accel(ACC_LPF_BW6)
-    time.sleep(1)
-    IIM46234_Set_BWConfig_Gyro(GYRO_LPF_BW6)
-    time.sleep(1)
-    IIM46234_Set_AccelConfig(accel_fsr)
-    time.sleep(1)   
-    IIM46234_Set_GyroConfig(gyro_fsr)
-    time.sleep(1)       
-    # IIM46234_Read_BWConfig_Accel()
-    # IIM46234_Read_BWConfig_Gyro()
-    # IIM46234_Read_BWConfig_Accel()
-    # IIM46234_Start_Streaming()
-    # read_sensor()
+    # IIM46234_Set_SampleRateDiv(1)
+    # time.sleep(1)
+    # IIM46234_Set_BWConfig_Accel(ACC_LPF_BW6)
+    # time.sleep(1)
+    # IIM46234_Set_BWConfig_Gyro(GYRO_LPF_BW6)
+    # time.sleep(1)
+    # IIM46234_Set_AccelConfig(accel_fsr)
+    # time.sleep(1)   
+    # IIM46234_Set_GyroConfig(gyro_fsr)
+    # time.sleep(1)       
+
+
+    IIM46234_Start_Streaming()
+    read_sensor()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        # IIM46234_Stop_Streaming()
+        IIM46234_Stop_Streaming()
         ser.close()
 
 
