@@ -1,6 +1,18 @@
 import serial
+import signal
 import struct
 import math
+import time
+import sys
+from typing import Optional
+import logging
+from typing import List
+import psutil
+import os
+
+# Constants
+BYTE_HEADER_REP = 0x23
+SIZE_PACKET_FULL_DATA = 46
 BYTE_HEADER_CMD = 0x24
 BYTE_HEADER_REP = 0x23
 BYTE_RESERVED = 0x00
@@ -48,9 +60,56 @@ BIT_SAVE_ALL_CONFIG_RESULT_IN_PROGRESS = 0x00
 BIT_SAVE_ALL_CONFIG_RESULT_SUCCESS = 0x01
 BIT_SAVE_ALL_CONFIG_RESULT_NOT_SAVED = 0x02
 
+ACC_FSR_16G = 0x00
+ACC_FSR_8G = 0x20
+ACC_FSR_4G = 0x40
+ACC_FSR_2G = 0x60
+GYRO_FSR_2000DPS = 0x00
+GYRO_FSR_1000DPS = 0x20
+GYRO_FSR_500DPS = 0x40
+GYRO_FSR_480DPS = 0x40
+GYRO_FSR_250DPS = 0x60
+ACC_LPF_BW4 = 0x40
+ACC_LPF_BW5 = 0x50
+ACC_LPF_BW6 = 0x60
+ACC_LPF_BW7 = 0x70
+GYRO_LPF_BW4 = 0x4
+GYRO_LPF_BW5 = 0x5
+GYRO_LPF_BW6 = 0x6
+GYRO_LPF_BW7 = 0x7
+
+dict_acc_fsr = {
+    ACC_FSR_16G: '16g',
+    ACC_FSR_8G: '8g',
+    ACC_FSR_4G: '4g',
+    ACC_FSR_2G: '2g'
+}
+dict_gyr_fsr = {
+    GYRO_FSR_2000DPS: '2000dps',
+    GYRO_FSR_1000DPS: '1000dps',
+    GYRO_FSR_500DPS: '500dps',
+    GYRO_FSR_480DPS: '480dps',
+    GYRO_FSR_250DPS: '250dps'
+}
+dict_acc_bw = {
+    ACC_LPF_BW4: 'BW4',
+    ACC_LPF_BW5: 'BW5',
+    ACC_LPF_BW6: 'BW6',
+    ACC_LPF_BW7: 'BW7'
+}
+dict_gyr_bw = {
+    GYRO_LPF_BW4: 'BW4',
+    GYRO_LPF_BW5: 'BW5',
+    GYRO_LPF_BW6: 'BW6',
+    GYRO_LPF_BW7: 'BW7'
+}
 
 IIM4623x_GRAVITY = 9.8
 global FORMAT, accel_scale, gyro_scale, temp_scale, temp_offset
+global lpf_bw, accel_fsr, gyro_fsr
+lpf_bw = ACC_LPF_BW4 | GYRO_LPF_BW4
+accel_fsr = ACC_FSR_4G | 0x06
+gyro_fsr = GYRO_FSR_480DPS | 0x06
 class Reg:
     def __init__(self, first_addr, length, page_id):
         self.first_addr = first_addr
@@ -64,8 +123,10 @@ BOOTLOADER_REV = Reg(0x13, 2, 0)
 FLASH_ENDURANCE = Reg(0x15, 4, 0)
 OUT_DATA_FORM = Reg(0x19, 1, 0)
 SELECT_OUT_DATA = Reg(0x1C, 1, 0)
-# Initialize the serial port
-ser = serial.Serial('COM22', 921600)
+BW_CONFIG = Reg(0x30, 1, 0)
+ACCEL_CONFIG0 = Reg(0x33, 1, 0)
+GYRO_CONFIG0 = Reg(0x34, 1, 0)
+SAMPLE_RATE_DIV = Reg (0x1A, 2 , 0)
 
 def calc_checksum(buff):
     return sum(buff) & 0xFFFF
@@ -89,7 +150,6 @@ def IIM46234_SetCMD_ReadRegister(user_reg):
 
 
 def IIM46234_SetCMD_WriteRegister(user_reg, value):
-
     cmd_packet = [0x00] * SIZE_PACKET_CMD
     cmd_packet[0] = BYTE_HEADER_CMD
     cmd_packet[1] = BYTE_HEADER_CMD
@@ -101,20 +161,27 @@ def IIM46234_SetCMD_WriteRegister(user_reg, value):
     cmd_packet[7] = user_reg.page_id
 
     if user_reg.length == 1:
-        cmd_packet[8] = value  # Assuming value is a list of bytes in Python
+        cmd_packet[8] = value
+    elif user_reg.length == 2:
+        cmd_packet[8] = (value >> 8) & 0xFF
+        cmd_packet[9] = value & 0xFF
+    elif user_reg.length == 4:
+        cmd_packet[8] = (value >> 24) & 0xFF
+        cmd_packet[9] = (value >> 16) & 0xFF
+        cmd_packet[10] = (value >> 8) & 0xFF
+        cmd_packet[11] = value & 0xFF
     else:
         print("Does not support this length")
+        return None
 
-    # Assuming calc_checksum is a function that's already defined in Python
     checksum = calc_checksum(cmd_packet[3:8 + user_reg.length])
 
     cmd_packet[8 + user_reg.length] = (checksum >> 8) & 0xFF
-    cmd_packet[9 + user_reg.length] = checksum & 0x00FF
+    cmd_packet[9 + user_reg.length] = checksum & 0xFF
     cmd_packet[10 + user_reg.length] = BYTE_FOOTER_1
     cmd_packet[11 + user_reg.length] = BYTE_FOOTER_2
 
-    return cmd_packet  # Added this line to return the cmd_packet, since the original C code doesn't explicitly return anything
-
+    return cmd_packet
 
 def IIM46234_SetCMD_Common(cmd_type):
     cmd_packet = [0x00] * SIZE_PACKET_CMD
@@ -202,6 +269,78 @@ def IIM46234_Set_OutDataForm(out_data_form):
         temp_scale = 126.8
         temp_offset = 25
 
+def IIM46234_Read_AccelConfig():
+    cmd_packet = IIM46234_SetCMD_ReadRegister(ACCEL_CONFIG0)
+    ser.write(bytearray(cmd_packet))
+    fsr = ser.readline()
+    print('ACCEL_CONFIG:', dict_acc_fsr[fsr[12] ^ 0x06])
+
+def IIM46234_Set_AccelConfig(value):
+    global accel_fsr
+    accel_fsr &= 0x1F
+    accel_fsr |= value
+    cmd_packet = IIM46234_SetCMD_WriteRegister(ACCEL_CONFIG0, accel_fsr)
+    ser.write(bytearray(cmd_packet))
+
+def IIM46234_Read_GyroConfig():
+    cmd_packet = IIM46234_SetCMD_ReadRegister(GYRO_CONFIG0)
+    ser.write(bytearray(cmd_packet))
+    fsr = ser.readline()
+    print('GYRO_CONFIG:', dict_gyr_fsr[fsr[12] ^ 0x06])
+
+def IIM46234_Set_GyroConfig(value):
+    global gyro_fsr
+    gyro_fsr &= 0x1F
+    gyro_fsr |= value
+    cmd_packet = IIM46234_SetCMD_WriteRegister(GYRO_CONFIG0, gyro_fsr)
+    ser.write(bytearray(cmd_packet))
+
+def IIM46234_Read_BWConfig_Accel():
+    cmd_packet = IIM46234_SetCMD_ReadRegister(BW_CONFIG)
+    ser.write(bytearray(cmd_packet))
+    bw = ser.readline()
+    print('ACCEL_BW:', dict_acc_bw[bw[12] & 0xF0])
+
+def IIM46234_Set_BWConfig_Accel(acc_bw):
+    global lpf_bw
+    lpf_bw &= 0x0F
+    lpf_bw |= acc_bw
+    cmd_packet = IIM46234_SetCMD_WriteRegister(BW_CONFIG, lpf_bw)
+    ser.write(bytearray(cmd_packet))
+
+def IIM46234_Read_BWConfig_Gyro():
+    cmd_packet = IIM46234_SetCMD_ReadRegister(BW_CONFIG)
+    ser.write(bytearray(cmd_packet))
+    bw = ser.readline()
+    print('Gyro_BW:', dict_gyr_bw[bw[12] & 0x0F])
+
+def IIM46234_Set_BWConfig_Gyro(gyr_bw):
+    global lpf_bw
+    lpf_bw &= 0xF0
+    lpf_bw |= gyr_bw
+    cmd_packet = IIM46234_SetCMD_WriteRegister(BW_CONFIG, lpf_bw)
+    ser.write(bytearray(cmd_packet))
+# enum IIM4623x_SampleRateDiv {
+#     ODR_1KHZ = 1,
+#     ODR_500HZ = 2,
+#     ODR_250HZ = 4,
+#     ODR_200HZ = 5,
+#     ODR_125HZ = 8,
+#     ODR_100HZ = 10,
+#     ODR_50HZ = 20,
+#     ODR_25HZ = 40,
+#     ODR_20HZ = 50,
+#     ODR_10HZ = 100 // 0x64
+# };
+
+
+def IIM46234_Set_SampleRateDiv(divisor):
+    cmd_packet = IIM46234_SetCMD_WriteRegister(SAMPLE_RATE_DIV, divisor)
+    ser.write(bytearray(cmd_packet))
+
+
+
+
 class IIM4623xData:
     # Define the format for struct.unpack based on the structure layout
 
@@ -225,50 +364,159 @@ class IIM4623xData:
             self.footer
         ) = struct.unpack(FORMAT, buffer)
 
-
-
-def read_sensor():
+def read_sensor(serial_port):
+    buffer = bytearray()
     while True:
-        rbuf_data = [0] * SIZE_PACKET_FULL_DATA
-        rbuf_data = ser.read(SIZE_PACKET_FULL_DATA)
+        try:
+            # Read a large chunk of data from the serial port
+            data = serial_port.read(1024)  # Read 1024 bytes at a time
+            buffer.extend(data)
+            
+            # Process buffer to extract and process complete packets
+            while len(buffer) >= SIZE_PACKET_FULL_DATA:
+                # Find the start of a packet
+                start_index = buffer.find(BYTE_HEADER_REP.to_bytes(1, 'big'))
+                if start_index == -1:
+                    # No valid header found, clear buffer
+                    buffer.clear()
+                    break
+                
+                # Ensure we have a full packet starting from start_index
+                if len(buffer) - start_index < SIZE_PACKET_FULL_DATA:
+                    # Not enough data for a full packet, wait for more data
+                    break
+                
+                # Extract a packet
+                packet = buffer[start_index:start_index + SIZE_PACKET_FULL_DATA]
+                buffer = buffer[start_index + SIZE_PACKET_FULL_DATA:]
+                
+                # Verify the packet header
+                if packet[0] != BYTE_HEADER_REP or packet[1] != BYTE_HEADER_REP:
+                    print(f"Wrong data stream header (0x{packet[0]:02x} 0x{packet[1]:02x})")
+                    continue
 
-        checksum_read = (rbuf_data[SIZE_PACKET_FULL_DATA - 4] << 8) | rbuf_data[SIZE_PACKET_FULL_DATA - 3]
-        checksum = calc_checksum(rbuf_data[3:SIZE_PACKET_FULL_DATA - 4])
+                # Verify the packet type
+                if packet[3] != 0xAB:
+                    print(f"Wrong data stream type (0x{packet[3]:02x})")
+                    continue
 
-        if rbuf_data[0] != BYTE_HEADER_REP or rbuf_data[1] != BYTE_HEADER_REP:
-            print(f"Wrong data stream header (0x{rbuf_data[0]:02x} 0x{rbuf_data[1]:02x})")
-        if rbuf_data[3] != 0xAB:
-            print(f"Wrong data stream type (0x{rbuf_data[3]:02x})")
+                # Verify the checksum
+                checksum_read = (packet[SIZE_PACKET_FULL_DATA - 4] << 8) | packet[SIZE_PACKET_FULL_DATA - 3]
+                checksum = calc_checksum(packet[3:SIZE_PACKET_FULL_DATA - 4])
+                if checksum != checksum_read:
+                    print(f"Incorrect checksum (read data) {checksum_read} {checksum}")
+                    continue
 
-        if checksum != checksum_read:
-            print(f"Incorrect checksum (read data) {checksum_read} {checksum}")
+                # Process the valid packet
+                data = IIM4623xData(packet)
+                data.ax = convert_to_float(data.ax, accel_scale)
+                data.ay = convert_to_float(data.ay, accel_scale)
+                data.az = convert_to_float(data.az, accel_scale)
+                data.gx = convert_to_float(data.gx, gyro_scale)
+                data.gy = convert_to_float(data.gy, gyro_scale)
+                data.gz = convert_to_float(data.gz, gyro_scale)
+                data.temp = data.temp * temp_scale + temp_offset
+
+                print("ax: %.6f, ay: %.6f, az: %.6f, gx: %.6f, gy: %.6f, gz: %.6f, temp: %.6f" %
+                      (data.ax, data.ay, data.az, data.gx, data.gy, data.gz, data.temp))
+        
+        except serial.SerialException as e:
+            print(f"Serial exception: {e}")
+        except Exception as e:
+            print(f"Unexpected error: {e}")
 
 
-        data = IIM4623xData(rbuf_data)
+def IIM4623_flush_data(serial_port):
+    try:
+        for i in range(10):
+            # Clear the input and output buffers
+            serial_port.reset_input_buffer()
+            serial_port.reset_output_buffer()
+            # print("UART buffer flushed successfully")
+            time.sleep(0.01)  # Sleep for 10 milliseconds
+    except serial.SerialException as e:
+        print(f"Error flushing UART buffer: {e}")
 
 
+def find_port() -> Optional[str]:
+    from serial.tools.list_ports import comports
 
-        data.ax = convert_to_float(data.ax, accel_scale)
-        data.ay = convert_to_float(data.ay, accel_scale)
-        data.az = convert_to_float(data.az, accel_scale)
+    vid = [0x403, 0x04b4]
+    pid = [0x6001, 0x0003]
+    for info in comports():
+        if info.vid and info.vid in vid and info.pid in pid:
+            return info.device
+        if 'VID_04B4' in info.hwid and 'PID_0003' in info.hwid:
+            return info.device
+    return None
 
-        data.gx = convert_to_float(data.gx, gyro_scale)
-        data.gy = convert_to_float(data.gy, gyro_scale)
-        data.gz = convert_to_float(data.gz, gyro_scale)
-        data.temp = data.temp*temp_scale+temp_offset
+def sig_handler(sig, frame):
+    global ser
+    logging.info(f'Program terminated by signal #{sig}')
+    cleanup()
+    sys.exit(0)
 
-        print(f"ax: {data.ax}, ay: {data.ay}, az: {data.az} gx: {data.gx}, gy: {data.gy}, gz: {data.gz} temp: {data.temp}")
+def cleanup():
+    global ser
+    try:
+        if ser.is_open:
+            IIM46234_Stop_Streaming()
+            ser.close()
+            logging.info("Serial connection closed.")
+    except Exception as e:
+        logging.error(f"Error during cleanup: {e}")
+def set_high_priority():
+    p = psutil.Process(os.getpid())
+    try:
+        p.nice(psutil.REALTIME_PRIORITY_CLASS)
+        print("Process priority set to real-time.")
+    except Exception as e:
+        print(f"Failed to set process priority: {e}")
 
-
+signal.signal(signal.SIGINT, sig_handler)
 
 def main():
+    set_high_priority()
+    com_port = find_port()
+    if com_port is None:
+        print("No suitable COM port found.")
+        return
+
+    global ser
+    ser = serial.Serial(com_port, baudrate=921600, timeout=0.1)
+    ser.set_buffer_size(rx_size=1048576, tx_size=512)
+
+    IIM46234_Stop_Streaming()
+    IIM4623_flush_data(ser)
     IIM46234_Read_WhoAmI()
     IIM46234_Get_Version()
     IIM46234_Set_SelectOutData(BIT_SELECT_OUT_DATA_ACC | BIT_SELECT_OUT_DATA_GYRO | BIT_SELECT_OUT_DATA_TEMP)
     IIM46234_Get_SerialNum()
     IIM46234_Set_OutDataForm(0)
+    IIM46234_Read_AccelConfig()
+    IIM46234_Read_GyroConfig()
+    IIM46234_Read_BWConfig_Accel()
+    IIM46234_Read_BWConfig_Gyro()
+
+    #  ODR_1KHZ = 1, 
+    IIM46234_Set_SampleRateDiv(1)
+    IIM4623_flush_data(ser)
+    IIM46234_Set_BWConfig_Accel(ACC_LPF_BW4)
+    IIM4623_flush_data(ser)
+    IIM46234_Set_BWConfig_Gyro(GYRO_LPF_BW4)
+    IIM4623_flush_data(ser)
+    IIM46234_Set_AccelConfig(ACC_FSR_2G)
+    IIM4623_flush_data(ser)
+    IIM46234_Set_GyroConfig(GYRO_FSR_480DPS)
+    IIM4623_flush_data(ser)
+
+    IIM46234_Read_AccelConfig()
+    IIM46234_Read_GyroConfig()
+    IIM46234_Read_BWConfig_Accel()
+    IIM46234_Read_BWConfig_Gyro()
+    IIM4623_flush_data(ser)
     IIM46234_Start_Streaming()
-    read_sensor()
+    read_sensor(ser)
 
 if __name__ == "__main__":
     try:
