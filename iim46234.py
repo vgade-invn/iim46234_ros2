@@ -127,8 +127,6 @@ BW_CONFIG = Reg(0x30, 1, 0)
 ACCEL_CONFIG0 = Reg(0x33, 1, 0)
 GYRO_CONFIG0 = Reg(0x34, 1, 0)
 SAMPLE_RATE_DIV = Reg (0x1A, 2 , 0)
-# Initialize the serial port
-# ser = serial.Serial('COM4', 921600)
 
 def calc_checksum(buff):
     return sum(buff) & 0xFFFF
@@ -485,7 +483,7 @@ def main():
         return
 
     global ser
-    ser = serial.Serial('COM20', baudrate=921600, timeout=0.1)
+    ser = serial.Serial(com_port, baudrate=921600, timeout=0.1)
     ser.set_buffer_size(rx_size=1048576, tx_size=512)
 
     IIM46234_Stop_Streaming()
@@ -507,7 +505,13 @@ def main():
     IIM4623_flush_data(ser)
     IIM46234_Set_BWConfig_Gyro(GYRO_LPF_BW4)
     IIM4623_flush_data(ser)
+    IIM46234_Set_AccelConfig(ACC_FSR_2G)
+    IIM4623_flush_data(ser)
+    IIM46234_Set_GyroConfig(GYRO_FSR_480DPS)
+    IIM4623_flush_data(ser)
 
+    IIM46234_Read_AccelConfig()
+    IIM46234_Read_GyroConfig()
     IIM46234_Read_BWConfig_Accel()
     IIM46234_Read_BWConfig_Gyro()
     IIM4623_flush_data(ser)
