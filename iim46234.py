@@ -9,6 +9,7 @@ import logging
 from typing import List
 import psutil
 import os
+from datetime import datetime
 
 # Constants
 BYTE_HEADER_REP = 0x23
@@ -425,6 +426,72 @@ def read_sensor(serial_port):
         except Exception as e:
             print(f"Unexpected error: {e}")
 
+def write_sensor(serial_port):
+    # open file
+    cur_time = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
+    filename = cur_time + '.csv'
+    with open(filename, 'w') as f:
+        f.write('ax,ay,az,gx,gy,gz,temp\n') # header
+        # read sensor
+        buffer = bytearray()
+        while True:
+            try:
+                # Read a large chunk of data from the serial port
+                data = serial_port.read(1024)  # Read 1024 bytes at a time
+                buffer.extend(data)
+                
+                # Process buffer to extract and process complete packets
+                while len(buffer) >= SIZE_PACKET_FULL_DATA:
+                    # Find the start of a packet
+                    start_index = buffer.find(BYTE_HEADER_REP.to_bytes(1, 'big'))
+                    if start_index == -1:
+                        # No valid header found, clear buffer
+                        buffer.clear()
+                        break
+                    
+                    # Ensure we have a full packet starting from start_index
+                    if len(buffer) - start_index < SIZE_PACKET_FULL_DATA:
+                        # Not enough data for a full packet, wait for more data
+                        break
+                    
+                    # Extract a packet
+                    packet = buffer[start_index:start_index + SIZE_PACKET_FULL_DATA]
+                    buffer = buffer[start_index + SIZE_PACKET_FULL_DATA:]
+                    
+                    # Verify the packet header
+                    if packet[0] != BYTE_HEADER_REP or packet[1] != BYTE_HEADER_REP:
+                        print(f"Wrong data stream header (0x{packet[0]:02x} 0x{packet[1]:02x})")
+                        continue
+
+                    # Verify the packet type
+                    if packet[3] != 0xAB:
+                        print(f"Wrong data stream type (0x{packet[3]:02x})")
+                        continue
+
+                    # Verify the checksum
+                    checksum_read = (packet[SIZE_PACKET_FULL_DATA - 4] << 8) | packet[SIZE_PACKET_FULL_DATA - 3]
+                    checksum = calc_checksum(packet[3:SIZE_PACKET_FULL_DATA - 4])
+                    if checksum != checksum_read:
+                        print(f"Incorrect checksum (read data) {checksum_read} {checksum}")
+                        continue
+
+                    # Process the valid packet
+                    data = IIM4623xData(packet)
+                    data.ax = convert_to_float(data.ax, accel_scale)
+                    data.ay = convert_to_float(data.ay, accel_scale)
+                    data.az = convert_to_float(data.az, accel_scale)
+                    data.gx = convert_to_float(data.gx, gyro_scale)
+                    data.gy = convert_to_float(data.gy, gyro_scale)
+                    data.gz = convert_to_float(data.gz, gyro_scale)
+                    data.temp = data.temp * temp_scale + temp_offset
+                    
+                    f.write('{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.2f}\n'.format(data.ax, data.ay, data.az, data.gx, data.gy, data.gz, data.temp))
+                    # f.write('{:.6f},{:.6f},{:.6f}\n'.format(data.ax, data.ay, data.az))
+            
+            except serial.SerialException as e:
+                print(f"Serial exception: {e}")
+            except Exception as e:
+                print(f"Unexpected error: {e}")
 
 def IIM4623_flush_data(serial_port):
     try:
@@ -516,7 +583,8 @@ def main():
     IIM46234_Read_BWConfig_Gyro()
     IIM4623_flush_data(ser)
     IIM46234_Start_Streaming()
-    read_sensor(ser)
+    # read_sensor(ser)
+    write_sensor(ser)
 
 if __name__ == "__main__":
     try:
