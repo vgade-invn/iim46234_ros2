@@ -10,6 +10,7 @@ from typing import List
 import psutil
 import os
 from datetime import datetime
+import time
 
 # Constants
 BYTE_HEADER_REP = 0x23
@@ -426,15 +427,18 @@ def read_sensor(serial_port):
         except Exception as e:
             print(f"Unexpected error: {e}")
 
-def write_sensor(serial_port):
+def write_sensor(serial_port, duration=10):
     # open file
     cur_time = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     filename = cur_time + '.csv'
     with open(filename, 'w') as f:
         f.write('ax,ay,az,gx,gy,gz,temp\n') # header
+
+        start_time = time.time()
+
         # read sensor
         buffer = bytearray()
-        while True:
+        while time.time() - start_time < duration:
             try:
                 # Read a large chunk of data from the serial port
                 data = serial_port.read(1024)  # Read 1024 bytes at a time
@@ -492,6 +496,8 @@ def write_sensor(serial_port):
                 print(f"Serial exception: {e}")
             except Exception as e:
                 print(f"Unexpected error: {e}")
+
+
 
 def IIM4623_flush_data(serial_port):
     try:
